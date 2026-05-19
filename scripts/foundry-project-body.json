@@ -1,0 +1,10 @@
+{
+  "location": "eastus",
+  "identity": {
+    "type": "SystemAssigned"
+  },
+  "properties": {
+    "displayName": "enterprise-knowledge-project",
+    "description": "Project for enterprise knowledge ingestion and grounded chat."
+  }
+}

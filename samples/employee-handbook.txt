@@ -1,0 +1,13 @@
+Employee Handbook
+
+Travel Policy
+Employees may book economy travel for trips shorter than six hours.
+Vice presidents may approve business-class travel when a customer workshop requires overnight recovery time.
+
+Expense Policy
+Receipts are required for any reimbursement above 25 USD.
+Managers must approve expenses within five business days.
+
+Security Policy
+Customer data must not be stored on unmanaged devices.
+Incidents must be reported to the security response mailbox within one hour.

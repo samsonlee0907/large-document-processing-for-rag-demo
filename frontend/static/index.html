@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Enterprise Knowledge Ingestion</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260519a" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="rail">
+        <div>
+          <p class="eyebrow">Enterprise Retrieval Ops</p>
+          <h1>Knowledge Control Plane</h1>
+          <p class="muted">
+            Upload, preprocess, publish, and chat over enterprise knowledge using a production-minded ingestion pipeline.
+          </p>
+        </div>
+        <nav class="nav">
+          <button class="nav-link active" data-screen="dashboard">Dashboard</button>
+          <button class="nav-link" data-screen="ingestion">Ingestion</button>
+          <button class="nav-link" data-screen="knowledge">Knowledge Base</button>
+          <button class="nav-link" data-screen="chat">Chat</button>
+        </nav>
+        <section class="config-card">
+          <p class="config-label">Integration Mode</p>
+          <div id="config-summary" class="muted small">Loading configuration…</div>
+        </section>
+      </aside>
+
+      <main class="content">
+        <section id="screen-dashboard" class="screen active">
+          <div class="screen-header">
+            <div>
+              <p class="eyebrow">Operational Snapshot</p>
+              <h2>Dashboard</h2>
+            </div>
+          </div>
+          <div class="metrics-grid" id="metrics-grid"></div>
+          <div class="panel">
+            <div class="panel-head">
+              <h3>Recent Activity</h3>
+              <button class="ghost" id="refresh-dashboard">Refresh</button>
+            </div>
+            <div id="recent-activity" class="table-like"></div>
+          </div>
+        </section>
+
+        <section id="screen-ingestion" class="screen">
+          <div class="screen-header">
+            <div>
+              <p class="eyebrow">Pipeline Control</p>
+              <h2>Document Ingestion</h2>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <h3>Upload Document</h3>
+              <div class="upload-form">
+                <button class="ghost" id="generate-random-research">Generate Random Research Corpus</button>
+                <button class="ghost" id="generate-futures-report">Generate AI Futures Report</button>
+                <button class="ghost" id="generate-construction-report">Generate Construction Report</button>
+              </div>
+            </div>
+            <form id="upload-form" class="upload-form">
+              <label class="file-drop">
+                <span>Select a local file for ingestion</span>
+                <input type="file" id="upload-input" name="file" required />
+              </label>
+              <button type="submit" class="primary">Submit</button>
+            </form>
+            <div id="generation-status" class="operation-status hidden" aria-live="polite"></div>
+            <p class="hint">
+              Pipeline stages: Uploaded → Parsing → OCR/Layout extraction → Cleanup → Chunking → Metadata enrichment → Embedding/index preparation → Publishing → Ready for chat.
+            </p>
+            <p class="hint">
+              The random research action selects a meaningful topic pack and generates a long-form PDF above the Document Intelligence hard page limit so the backend must segment it before extraction.
+            </p>
+            <p class="hint">
+              The futures report action creates a 500+ page research-style PDF with ten sections and embedded diagrams to test large-document and figure handling.
+            </p>
+            <p class="hint">
+              The construction report action creates a 500+ page construction-industry corpus with online-research themes, a search architecture diagram, and figure-ready pages for the pipeline.
+            </p>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <h3>Submitted Documents</h3>
+              <button class="ghost" id="refresh-documents">Refresh</button>
+            </div>
+            <div id="documents-list" class="doc-grid"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <h3>Selected Document Detail</h3>
+            </div>
+            <div id="document-detail" class="detail-card muted">Select a document card to inspect the full pipeline state.</div>
+          </div>
+        </section>
+
+        <section id="screen-knowledge" class="screen">
+          <div class="screen-header">
+            <div>
+              <p class="eyebrow">Publishing State</p>
+              <h2>Knowledge Base Status</h2>
+            </div>
+            <button class="primary" id="sync-knowledge">Refresh / Re-index</button>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <h3>Target Corpus</h3>
+            </div>
+            <div id="knowledge-status" class="detail-card"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <h3>Documents in Corpus</h3>
+            </div>
+            <div id="knowledge-documents" class="table-like"></div>
+          </div>
+        </section>
+
+        <section id="screen-chat" class="screen">
+          <div class="screen-header">
+            <div>
+              <p class="eyebrow">Grounded Retrieval</p>
+              <h2>Chat</h2>
+            </div>
+          </div>
+          <div class="chat-layout">
+            <div class="panel">
+              <div class="panel-head">
+                <h3>Conversation</h3>
+              </div>
+              <div class="chat-scope-panel">
+                <div class="scope-toggle" role="tablist" aria-label="Corpus selection mode">
+                  <button type="button" class="ghost active" id="chat-scope-auto">Auto Mode</button>
+                  <button type="button" class="ghost" id="chat-scope-custom">Custom Selection</button>
+                </div>
+                <div id="chat-scope-summary" class="muted small">Auto mode uses all ready corpora.</div>
+                <div id="chat-corpus-picker" class="chat-corpus-picker hidden"></div>
+              </div>
+              <div id="chat-thread" class="chat-thread">
+                <div class="chat-empty">The corpus must be ready before chat returns grounded results.</div>
+              </div>
+              <form id="chat-form" class="chat-form">
+                <textarea id="chat-input" rows="5" placeholder="Ask a grounded question about the indexed knowledge…" required></textarea>
+                <button type="submit" class="primary">Send</button>
+              </form>
+            </div>
+            <div class="panel">
+              <div class="panel-head">
+                <h3>Response Evidence</h3>
+                <button class="ghost" id="toggle-debug">Toggle Debug</button>
+              </div>
+              <div id="chat-citations" class="citation-list muted">No citations yet.</div>
+              <div class="panel-head panel-subhead">
+                <h3>Agentic Retrieval Activity</h3>
+              </div>
+              <div id="chat-subqueries" class="citation-list muted">No query plan yet.</div>
+              <pre id="chat-debug" class="debug-panel hidden"></pre>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js?v=20260519a" defer></script>
+  </body>
+</html>

@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pydantic
+requests
+python-multipart
+pypdf
+python-docx
+reportlab
+azure-storage-blob
+azure-identity
