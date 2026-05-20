@@ -141,7 +141,12 @@ class IngestionPipeline:
             )
 
             adapter = build_foundry_adapter()
-            publish_status = adapter.publish(enriched_chunks)
+            section_headings = [section.heading for section in intermediate.sections[:12] if section.heading]
+            publish_status = adapter.publish(
+                enriched_chunks,
+                source_name=intermediate.source_name,
+                route_text=" ".join(section_headings),
+            )
             job_store.update_publish_status(doc_id, publish_status)
             job_store.mark_stage(doc_id, Stage.publishing, 92, publish_status.message)
 

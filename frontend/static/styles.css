@@ -514,8 +514,29 @@ textarea {
   font-size: 0.92em;
 }
 
+.inline-citation-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.9rem;
+  padding: 0.05rem 0.38rem;
+  margin: 0 0.08rem;
+  border-radius: 999px;
+  text-decoration: none;
+  background: rgba(15, 107, 83, 0.12);
+  color: var(--accent);
+  border: 1px solid rgba(15, 107, 83, 0.18);
+  font-weight: 600;
+}
+
 .message-row.user .message-body code {
   background: rgba(255, 255, 255, 0.18);
+}
+
+.message-row.user .inline-citation-link {
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.24);
+  color: white;
 }
 
 .message-code {
@@ -558,6 +579,58 @@ textarea {
   padding: 0.9rem;
   background: rgba(217, 239, 230, 0.45);
   border: 1px solid rgba(15, 107, 83, 0.1);
+}
+
+.citation-summary {
+  border-radius: 18px;
+  padding: 0.9rem 1rem;
+  background: rgba(250, 252, 251, 0.9);
+  border: 1px solid rgba(16, 37, 30, 0.08);
+}
+
+.citation-group {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.citation-group-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.1rem 0.2rem;
+}
+
+.citation-card-head {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.75rem;
+  align-items: start;
+  margin-bottom: 0.55rem;
+}
+
+.citation-ref-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.1rem;
+  padding: 0.16rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.88rem;
+  font-weight: 700;
+  background: rgba(15, 107, 83, 0.14);
+  color: var(--accent);
+}
+
+.citation-meta,
+.citation-query {
+  margin-bottom: 0.45rem;
+}
+
+.citation-card-active {
+  border-color: rgba(15, 107, 83, 0.42);
+  box-shadow: 0 0 0 3px rgba(15, 107, 83, 0.12);
+  transition: box-shadow 180ms ease, border-color 180ms ease;
 }
 
 .subquery-card {

@@ -33,4 +33,6 @@
 - `AZURE_SEARCH_KNOWLEDGE_SOURCE_NAME`
 - `AZURE_SEARCH_KNOWLEDGE_BASE_NAME`
 - `AZURE_SEARCH_API_VERSION`
+- `AZURE_SEARCH_EXTRA_SOURCES_JSON`: optional JSON array of extra search-index knowledge sources to include in the knowledge base for multi-index routing.
+- `AZURE_SEARCH_AUTO_BROADCAST_LIMIT`: when no source-specific hint matches, auto mode can broadcast across all configured indexes up to this limit.
 - `FOUNDRY_CHAT_MODE`

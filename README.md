@@ -4,6 +4,20 @@ Production-minded FastAPI application for enterprise document ingestion, large-f
 
 The core design rule is simple: **the file is not the indexed unit**. A document first goes through profiling, parser selection, optional extractor-side segmentation, document reassembly, normalization, figure extraction, and structure-aware chunking. Only the resulting retrieval-ready chunks are published to Search.
 
+## Platform Context
+
+### What is Azure AI Search?
+
+Azure AI Search is Azure's retrieval system for text, vector, hybrid, and multimodal search workloads. Microsoft positions it as the indexing and retrieval layer for both classic search and modern RAG or agentic retrieval applications. In this repo, Azure AI Search is the system of record for searchable chunks, knowledge sources, and the knowledge base queried by chat.
+
+### What is Foundry IQ?
+
+Foundry IQ is Microsoft Foundry's managed knowledge-base experience. Microsoft describes agentic retrieval as the multi-query retrieval engine that powers Foundry IQ knowledge bases, and notes that custom applications can use the same knowledge-base APIs through Azure AI Search. In other words, this repo uses Azure AI Search directly as the programmable path behind the same retrieval model that powers Foundry IQ.
+
+### How this repo uses them together
+
+This app prepares documents locally, publishes retrieval-ready chunks into Azure AI Search, creates knowledge sources and a knowledge base, and then calls the knowledge-base retrieval path from chat. A Foundry model deployment is used for grounded answer synthesis, figure understanding, and optionally for Search-side query planning in preview agentic flows.
+
 ## What The App Does
 
 - Uploads local documents through a web UI.
@@ -16,9 +30,110 @@ The core design rule is simple: **the file is not the indexed unit**. A document
 - Stores figure artifacts locally and attempts Blob upload when configured.
 - Chunks content by structure instead of flattening whole documents.
 - Publishes chunks into Azure AI Search index, knowledge source, and knowledge base.
+- Can route grounded retrieval across multiple Azure AI Search knowledge sources and indexes.
+- Lets the operator delete corpora and re-sync them without rebuilding the whole repo state.
 - Uses Azure AI Search knowledge-base retrieval as the grounded retrieval layer.
 - Uses deployed `gpt-5.4` to synthesize final answers from retrieved evidence.
 - Shows citations, image evidence, and agentic retrieval activity in the chat UI.
+- Supports auto corpus routing and custom corpus selection in chat.
+- Links inline answer references like `[1]` to grouped evidence cards in the side panel.
+
+## Prerequisites
+
+### Local prerequisites
+
+- Python with `pip`
+- PowerShell for the included provisioning and run scripts
+- Azure CLI with an authenticated session
+- An Azure subscription that can create Search, Storage, AI Services, and Document Intelligence resources
+
+### Azure prerequisites
+
+- An Azure AI Search service
+- A Microsoft Foundry or Azure AI Services resource for model deployments
+- An Azure AI Document Intelligence resource
+- An Azure Storage account and blob container for figure artifacts
+- A Foundry project if you want to manage model deployments and Foundry-connected workflows from the portal
+
+Optional:
+
+- Content Understanding, if your target environment supports it and you want to test that parser path
+- Extra Azure AI Search indexes and knowledge sources if you want true multi-index routing
+
+Microsoft's current guidance describes Azure AI Search knowledge bases and knowledge sources as the programmable surface for agentic retrieval, with knowledge sources pointing at one or more searchable content stores and knowledge bases orchestrating retrieval behavior. Azure AI Search also recommends managed identity and RBAC for service-to-service authentication where possible.
+
+## What You Need To Deploy
+
+For the minimum working path in this repo, deploy:
+
+1. Azure AI Search
+2. Azure AI Document Intelligence
+3. Microsoft Foundry or Azure AI Services resource
+4. Azure Storage account with a blob container
+
+For the richer path demonstrated in this repo, also deploy:
+
+1. A Foundry project
+2. A chat model deployment for final synthesis
+3. A Search planning model deployment if you want Azure AI Search preview query planning with an attached LLM
+4. Additional Search indexes if you want separate corpus lanes instead of one shared index
+
+Azure AI Search knowledge bases can reference one or more knowledge sources, and each knowledge source can encapsulate a search index or certain remote sources. The stable `2026-04-01` programmatic surface is generally available, while some fuller agentic features remain on preview flows documented under `2025-11-01-preview`.
+
+## Deployment Setup
+
+### 1. Provision Azure resources
+
+This repo includes [scripts/provision-azure.ps1](scripts/provision-azure.ps1) to create the baseline Azure resources:
+
+- resource group
+- storage account and blob container
+- Azure AI Search service
+- Azure AI Document Intelligence resource
+- Foundry or AI Services resource
+- optional Foundry project
+
+Example:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\provision-azure.ps1 `
+  -SubscriptionId "<your-subscription-id>" `
+  -Location "eastus" `
+  -ResourceGroupName "rg-enterprise-knowledge-demo" `
+  -CreateFoundryProject
+```
+
+### 2. Deploy the models you want to use
+
+This repo expects:
+
+- one chat model deployment for grounded answer synthesis
+- optionally one planning model deployment for Azure AI Search agentic query planning
+- optionally one embedding deployment if you extend the indexing path further
+
+The current app supports using a Search-attached LLM deployment for agentic planning and a separate Foundry deployment for final answer synthesis. Microsoft documents that knowledge bases can include an optional LLM, and their agentic quickstart uses an Azure OpenAI model from Foundry Models for conversational retrieval.
+
+### 3. Configure the app
+
+Copy [.env.example](.env.example) to `.env`, then populate:
+
+- Search endpoint, keys, index name, knowledge source name, and knowledge base name
+- Document Intelligence endpoint and key
+- Foundry endpoint and chat deployment name
+- optional Search planning model settings
+- optional Blob storage settings
+- optional extra knowledge-source JSON for multi-index routing
+
+### 4. Let the app create Search-side retrieval objects
+
+After the Azure services are configured, the app creates or updates:
+
+- the Search index used for chunk storage
+- the Search knowledge source
+- the Search knowledge base
+
+This is why the provisioning script stops at service creation and does not try to hardcode your final corpus objects.
 
 ## Current Architecture
 
@@ -63,9 +178,12 @@ The UI includes:
 - Dashboard
 - Ingestion screen with sample generators
 - Knowledge-base status
+- Corpus management actions including delete
 - Chat screen with user and agent bubbles
+- Auto mode and custom corpus selection
 - Citation cards
 - Image evidence cards
+- Evidence grouped by knowledge source and index
 - Agentic retrieval activity panel
 - Debug toggle
 
@@ -162,6 +280,14 @@ The publishing adapter creates or updates:
 
 and uploads chunk records with merge-or-upload semantics.
 
+The scalable routing pattern is:
+
+- one Azure AI Search index per corpus lane
+- one knowledge source per index
+- one knowledge base that can query one or more knowledge sources per request
+
+This lets the app grow from one corpus lane to several without changing the chat contract.
+
 ### Grounded chat
 
 - `backend/services/chat.py`
@@ -170,9 +296,11 @@ and uploads chunk records with merge-or-upload semantics.
 The current chat path is:
 
 1. retrieve grounded references from Azure AI Search knowledge base
-2. hydrate citations and figure evidence
-3. send grounded evidence pack to deployed `gpt-5.4`
-4. render answer, citations, image evidence, and retrieval diagnostics in the UI
+2. derive visible subqueries and positive retrieval sources from Search activity
+3. hydrate citations and figure evidence
+4. supplement missing evidence when Search planned across multiple sources but returned unbalanced citations
+5. send grounded evidence pack to deployed `gpt-5.4`
+6. render answer, clickable references, grouped evidence cards, image evidence, and retrieval diagnostics in the UI
 
 ## Ingestion To Indexing Journey
 
@@ -589,6 +717,14 @@ requirements.txt
 
 ## Running The App
 
+### Installation
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
 ### Local run
 
 ```powershell
@@ -602,6 +738,18 @@ Or use the included launcher scripts:
 ```
 
 Open [http://127.0.0.1:8000/](http://127.0.0.1:8000/).
+
+### End-to-end startup checklist
+
+1. Authenticate to Azure with `az login`
+2. Provision the required Azure resources
+3. Copy `.env.example` to `.env`
+4. Fill in the Azure values emitted by provisioning
+5. Install Python dependencies
+6. Start the app
+7. Upload a file or generate a sample corpus
+8. Wait for the corpus to become ready
+9. Open Chat and test grounded retrieval
 
 ### Current endpoints
 
@@ -644,6 +792,14 @@ Copy `.env.example` to `.env` and populate the values you need.
 - `AZURE_SEARCH_KNOWLEDGE_SOURCE_NAME`
 - `AZURE_SEARCH_KNOWLEDGE_BASE_NAME`
 - `AZURE_SEARCH_API_VERSION`
+- `AZURE_SEARCH_EXTRA_SOURCES_JSON`
+- `AZURE_SEARCH_AUTO_BROADCAST_LIMIT`
+- `AZURE_SEARCH_LLM_DEPLOYMENT`
+- `AZURE_SEARCH_LLM_MODEL_NAME`
+- `AZURE_SEARCH_LLM_REASONING_EFFORT`
+- `AZURE_SEARCH_LLM_USE_MANAGED_IDENTITY`
+
+If you enable a knowledge-base LLM for Search planning, Microsoft's current guidance says the search service needs a managed identity and appropriate permissions on the Foundry resource when role-based authentication is used.
 
 ### Grounded GPT synthesis
 
@@ -665,10 +821,19 @@ The chat screen now supports:
 
 - user and agent message bubbles
 - rendered markdown output
+- auto corpus routing and custom corpus selection
 - citation cards
+- grouped evidence cards by knowledge source and index
+- clickable inline references that jump to evidence cards
 - inline image evidence for matched figures
 - agentic retrieval activity panel
 - raw diagnostics panel
+
+The evidence panel also summarizes:
+
+- which retrieval sources returned positive hits
+- which sources are represented in the final evidence cards
+- whether any positive retrieval source is still missing visible evidence
 
 One practical nuance: Azure AI Search agentic retrieval may perform reasoning without always returning multiple visible search steps in the response payload. The UI now distinguishes between:
 

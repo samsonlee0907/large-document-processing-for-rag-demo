@@ -145,6 +145,12 @@ class ChatCitation(BaseModel):
     page_numbers: list[int] = Field(default_factory=list)
     snippet: str = ""
     image_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    reference_id: int | None = None
+    knowledge_source: str | None = None
+    index_name: str | None = None
+    evidence_kind: str = "retrieval_reference"
+    supporting_query: str | None = None
+    retrieval_step: int | None = None
 
 
 class ChatTurnResponse(BaseModel):

@@ -54,6 +54,25 @@ def _load_chunk_records(job: JobRecord) -> list:
     return [ChunkRecord.model_validate(item) for item in payload]
 
 
+def _job_route_text(job: JobRecord) -> str:
+    if not job.intermediate_path or not Path(job.intermediate_path).exists():
+        return ""
+    try:
+        intermediate = json.loads(Path(job.intermediate_path).read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return ""
+    headings = []
+    for section in intermediate.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        heading = section.get("heading")
+        if isinstance(heading, str) and heading.strip():
+            headings.append(heading.strip())
+        if len(headings) >= 12:
+            break
+    return " ".join(headings)
+
+
 def _delete_job_artifacts(job: JobRecord) -> None:
     intermediate_payload = None
     if job.intermediate_path and Path(job.intermediate_path).exists():
@@ -111,6 +130,8 @@ def config_summary() -> dict[str, object]:
         "azure_agentic_retrieval_enabled": settings.azure_search_enabled,
         "azure_agentic_planning_model_enabled": settings.azure_search_llm_enabled,
         "azure_agentic_planning_model": settings.azure_search_llm_deployment,
+        "azure_search_multi_index_enabled": settings.azure_search_multi_index_enabled,
+        "azure_search_extra_indexes": [source.index_name for source in settings.azure_search_extra_sources],
         "azure_blob_storage_enabled": settings.azure_blob_storage_enabled,
         "foundry_chat_mode": settings.foundry_chat_mode,
         "knowledge_base_name": settings.azure_search_knowledge_base_name,
@@ -291,7 +312,10 @@ def delete_document(doc_id: str) -> dict[str, object]:
     adapter = build_foundry_adapter()
     chunks = _load_chunk_records(job)
     try:
-        adapter.delete_chunks(chunks)
+        adapter.delete_chunks(
+            chunks,
+            index_name=(job.publish_status.diagnostics or {}).get("index_name"),
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to remove corpus content from Azure AI Search: {exc}") from exc
 
@@ -331,17 +355,34 @@ def resync_knowledge() -> dict[str, object]:
     ready_jobs = [job for job in job_store.list_jobs() if job.chunks_path and Path(job.chunks_path).exists()]
     if not ready_jobs:
         raise HTTPException(status_code=400, detail="No processed documents are available to sync.")
-    chunks = []
-    for job in ready_jobs:
-        chunks.extend(json.loads(Path(job.chunks_path).read_text(encoding="utf-8")))
     adapter = build_foundry_adapter()
-    typed_chunks = []
-    for chunk in chunks:
-        from backend.domain.models import ChunkRecord
-
-        typed_chunks.append(ChunkRecord.model_validate(chunk))
-    status = adapter.publish(typed_chunks)
-    return status.model_dump(mode="json")
+    per_document = []
+    latest_status = None
+    for job in ready_jobs:
+        chunks = _load_chunk_records(job)
+        previous_index = (job.publish_status.diagnostics or {}).get("index_name")
+        status = adapter.publish(
+            chunks,
+            source_name=job.file_name,
+            route_text=_job_route_text(job),
+        )
+        latest_status = status
+        job_store.update_publish_status(job.doc_id, status)
+        new_index = (status.diagnostics or {}).get("index_name")
+        if previous_index and new_index and previous_index != new_index:
+            adapter.delete_chunks(chunks, index_name=previous_index)
+        per_document.append(
+            {
+                "doc_id": job.doc_id,
+                "file_name": job.file_name,
+                "index_name": new_index,
+                "knowledge_source_name": (status.diagnostics or {}).get("knowledge_source_name"),
+            }
+        )
+    return {
+        "status": latest_status.model_dump(mode="json") if latest_status else {},
+        "documents": per_document,
+    }
 
 
 @app.post("/api/chat", response_model=ChatTurnResponse)
@@ -361,6 +402,10 @@ def chat(request: ChatTurnRequest) -> ChatTurnResponse:
             raise HTTPException(status_code=400, detail=f"Some selected corpora are not ready: {', '.join(invalid)}")
 
     adapter = build_foundry_adapter()
+    doc_source_assignments = {
+        job.doc_id: (job.publish_status.diagnostics or {}).get("knowledge_source_name", settings.azure_search_knowledge_source_name)
+        for job in jobs
+    }
     if isinstance(adapter, LocalPreviewAdapter):
         chunks = []
         from backend.domain.models import ChunkRecord
@@ -379,7 +424,11 @@ def chat(request: ChatTurnRequest) -> ChatTurnResponse:
         return response
 
     try:
-        payload = adapter.chat(request.question, doc_ids=selected_doc_ids or None)
+        payload = adapter.chat(
+            request.question,
+            doc_ids=selected_doc_ids or None,
+            doc_source_assignments=doc_source_assignments,
+        )
         response = synthesize_grounded_chat(request.question, payload)
         response.diagnostics["corpus_mode"] = request.corpus_mode
         response.diagnostics["selected_doc_ids"] = selected_doc_ids

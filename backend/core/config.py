@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,98 @@ def _default_azure_cli_path() -> str:
     if candidate.exists():
         return str(candidate)
     return "az"
+
+
+DEFAULT_SEARCH_SOURCE_DATA_FIELDS: tuple[str, ...] = (
+    "doc_id",
+    "chunk_id",
+    "clean_text",
+    "source_name",
+    "source_uri",
+    "section_path",
+    "page_numbers",
+    "tags",
+    "image_evidence_json",
+)
+DEFAULT_SEARCH_FIELDS: tuple[str, ...] = ("*",)
+
+
+@dataclass(frozen=True, slots=True)
+class SearchKnowledgeSourceConfig:
+    knowledge_source_name: str
+    index_name: str
+    description: str = ""
+    route_keywords: tuple[str, ...] = ()
+    assignment_keywords: tuple[str, ...] = ()
+    semantic_configuration_name: str = "default-semantic-config"
+    source_data_fields: tuple[str, ...] = DEFAULT_SEARCH_SOURCE_DATA_FIELDS
+    search_fields: tuple[str, ...] = DEFAULT_SEARCH_FIELDS
+
+
+def _normalize_string_list(value: object, *, lower: bool = False) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        entry = item.strip()
+        if not entry:
+            continue
+        if lower:
+            entry = entry.lower()
+        if entry in seen:
+            continue
+        seen.add(entry)
+        normalized.append(entry)
+    return tuple(normalized)
+
+
+def _load_extra_search_sources() -> tuple[SearchKnowledgeSourceConfig, ...]:
+    raw = os.getenv("AZURE_SEARCH_EXTRA_SOURCES_JSON", "").strip()
+    if not raw:
+        return ()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(payload, list):
+        return ()
+
+    sources: list[SearchKnowledgeSourceConfig] = []
+    seen_names: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        knowledge_source_name = str(
+            item.get("knowledge_source_name") or item.get("name") or ""
+        ).strip()
+        index_name = str(item.get("index_name") or item.get("search_index_name") or "").strip()
+        if not knowledge_source_name or not index_name or knowledge_source_name in seen_names:
+            continue
+        seen_names.add(knowledge_source_name)
+        semantic_configuration_name = str(
+            item.get("semantic_configuration_name") or "default-semantic-config"
+        ).strip() or "default-semantic-config"
+        source_data_fields = _normalize_string_list(item.get("source_data_fields"))
+        search_fields = _normalize_string_list(item.get("search_fields"))
+        sources.append(
+            SearchKnowledgeSourceConfig(
+                knowledge_source_name=knowledge_source_name,
+                index_name=index_name,
+                description=str(item.get("description") or "").strip(),
+                route_keywords=_normalize_string_list(item.get("route_keywords"), lower=True),
+                assignment_keywords=_normalize_string_list(
+                    item.get("assignment_keywords") or item.get("document_keywords"),
+                    lower=True,
+                ),
+                semantic_configuration_name=semantic_configuration_name,
+                source_data_fields=source_data_fields or DEFAULT_SEARCH_SOURCE_DATA_FIELDS,
+                search_fields=search_fields or DEFAULT_SEARCH_FIELDS,
+            )
+        )
+    return tuple(sources)
 
 
 @dataclass(slots=True)
@@ -59,6 +152,8 @@ class Settings:
         "AZURE_SEARCH_KNOWLEDGE_BASE_NAME", "enterprise-knowledge-base"
     )
     azure_search_api_version: str = os.getenv("AZURE_SEARCH_API_VERSION", "2026-04-01")
+    azure_search_extra_sources: tuple[SearchKnowledgeSourceConfig, ...] = _load_extra_search_sources()
+    azure_search_auto_broadcast_limit: int = int(os.getenv("AZURE_SEARCH_AUTO_BROADCAST_LIMIT", "4"))
     azure_openai_embedding_deployment: str = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "")
     azure_foundry_resource_endpoint: str = os.getenv("AZURE_FOUNDRY_RESOURCE_ENDPOINT", "")
     azure_foundry_api_key: str = os.getenv("AZURE_FOUNDRY_API_KEY", "")
@@ -98,6 +193,10 @@ class Settings:
     @property
     def azure_search_enabled(self) -> bool:
         return bool(self.azure_search_endpoint and self.azure_search_key)
+
+    @property
+    def azure_search_multi_index_enabled(self) -> bool:
+        return len(self.azure_search_extra_sources) > 0
 
     @property
     def azure_foundry_chat_enabled(self) -> bool:

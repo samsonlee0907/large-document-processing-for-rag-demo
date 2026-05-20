@@ -140,6 +140,59 @@ function renderMarkdown(text) {
   return blocks.join("") || `<p>${renderInlineMarkdown(text)}</p>`;
 }
 
+function buildCitationById(citations = []) {
+  const map = new Map();
+  citations.forEach((citation) => {
+    if (citation && Number.isInteger(citation.reference_id)) {
+      map.set(citation.reference_id, citation);
+    }
+  });
+  return map;
+}
+
+function renderAnswerWithReferences(text, citations = []) {
+  const html = renderMarkdown(text);
+  const citationById = buildCitationById(citations);
+  return html.replace(/\[(\d+)\]/g, (match, rawId) => {
+    const refId = Number(rawId);
+    if (!citationById.has(refId)) {
+      return match;
+    }
+    return `<a href="#citation-ref-${refId}" class="inline-citation-link" data-citation-ref-link="${refId}">[${refId}]</a>`;
+  });
+}
+
+function bindCitationReferenceLinks() {
+  document.querySelectorAll("[data-citation-ref-link]").forEach((node) => {
+    node.addEventListener("click", (event) => {
+      event.preventDefault();
+      const refId = node.dataset.citationRefLink;
+      const target = document.getElementById(`citation-ref-${refId}`);
+      if (!target) return;
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      target.classList.add("citation-card-active");
+      window.setTimeout(() => target.classList.remove("citation-card-active"), 1600);
+    });
+  });
+}
+
+function groupCitationsBySource(citations = []) {
+  const groups = [];
+  const byKey = new Map();
+  citations.forEach((citation) => {
+    const sourceName = citation.knowledge_source || "unknown-source";
+    const indexName = citation.index_name || "unknown-index";
+    const key = `${sourceName}::${indexName}`;
+    if (!byKey.has(key)) {
+      const group = { key, sourceName, indexName, citations: [] };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    byKey.get(key).citations.push(citation);
+  });
+  return groups;
+}
+
 function setActiveScreen(screen) {
   document.querySelectorAll(".screen").forEach((node) => node.classList.remove("active"));
   document.querySelectorAll(".nav-link").forEach((node) => node.classList.remove("active"));
@@ -390,6 +443,7 @@ async function refreshConfig() {
         ? escapeHtml(payload.azure_agentic_planning_model || "configured")
         : "off"
     }</div>
+    <div>Multi-index routing: ${payload.azure_search_multi_index_enabled ? "configured" : "primary index only"}</div>
     <div>Doc Intelligence: ${payload.azure_document_intelligence_enabled ? "configured" : "off"}</div>
     <div>Content Understanding: ${payload.azure_content_understanding_enabled ? "configured" : "off"}</div>
     <div>Blob image store: ${payload.azure_blob_storage_enabled ? "configured" : "off"}</div>
@@ -522,53 +576,125 @@ function renderChatThread() {
     .join("");
 
   thread.scrollTop = thread.scrollHeight;
+  bindCitationReferenceLinks();
 }
 
-function renderCitations(citations) {
-  $("#chat-citations").innerHTML =
-    !citations || citations.length === 0
-      ? `<div class="muted">No citations returned.</div>`
-      : citations
-          .map((item) => `
-        <article class="citation-card">
-          <strong>${escapeHtml(item.title)}</strong>
-          <div class="muted small">${escapeHtml(item.uri || item.chunk_id || "No URI available")}</div>
-          <div class="muted small">${item.page_numbers?.length ? `Pages ${item.page_numbers.join(", ")}` : ""}</div>
-          <div>${escapeHtml(item.snippet)}</div>
-          ${
-            item.image_evidence?.length
-              ? `<div class="image-evidence-grid">
-                  ${item.image_evidence
-                    .filter((image) => image.artifact_id && item.doc_id)
-                    .slice(0, 2)
-                    .map(
-                      (image) => `
-                    <figure class="image-evidence-card">
-                      <img src="/api/documents/${item.doc_id}/figures/${image.artifact_id}" alt="${escapeHtml(
-                        image.image_name || "Figure evidence"
-                      )}" loading="lazy" />
-                      <figcaption>${escapeHtml(image.description || image.image_name || "Figure evidence")}</figcaption>
-                    </figure>
-                  `
-                    )
-                    .join("")}
-                </div>`
-              : ""
-          }
-        </article>
-      `)
-          .join("");
+function renderCitations(citations, diagnostics = {}) {
+  if (!citations || citations.length === 0) {
+    $("#chat-citations").innerHTML = `<div class="muted">No citations returned.</div>`;
+    return;
+  }
+
+  const sourceCounts = diagnostics.evidence_source_counts || {};
+  const missingSources = diagnostics.missing_positive_sources || [];
+  const summary = `
+    <article class="citation-summary">
+      <strong>Evidence Summary</strong>
+      <div class="muted small">Rendered knowledge sources: ${escapeHtml(
+        Object.entries(sourceCounts)
+          .map(([source, count]) => `${source} (${count})`)
+          .join(", ") || "none"
+      )}</div>
+      ${
+        missingSources.length
+          ? `<div class="muted small">Positive retrieval sources still missing evidence cards: ${escapeHtml(missingSources.join(", "))}</div>`
+          : `<div class="muted small">All positive retrieval sources are represented in the evidence panel.</div>`
+      }
+    </article>
+  `;
+
+  const groups = groupCitationsBySource(citations);
+  const html = groups
+    .map(
+      (group) => `
+      <section class="citation-group">
+        <div class="citation-group-head">
+          <strong>${escapeHtml(group.sourceName)}</strong>
+          <span class="muted small">${escapeHtml(group.indexName)} · ${group.citations.length} chunk${
+            group.citations.length === 1 ? "" : "s"
+          }</span>
+        </div>
+        ${group.citations
+          .map(
+            (item) => `
+          <article class="citation-card" id="citation-ref-${item.reference_id}" data-citation-card="${item.reference_id}">
+            <div class="citation-card-head">
+              <span class="citation-ref-badge">[${item.reference_id ?? "?"}]</span>
+              <div>
+                <strong>${escapeHtml(item.title)}</strong>
+                <div class="muted small">${escapeHtml(item.uri || item.chunk_id || "No URI available")}</div>
+              </div>
+            </div>
+            <div class="citation-meta muted small">
+              ${
+                item.page_numbers?.length
+                  ? `Pages ${item.page_numbers.join(", ")}`
+                  : "No page number available"
+              }
+              ${item.evidence_kind === "activity_support" ? " · source-balanced support" : ""}
+              ${item.retrieval_step ? ` · from step ${item.retrieval_step}` : ""}
+            </div>
+            ${
+              item.supporting_query
+                ? `<div class="citation-query muted small">Support query: ${escapeHtml(item.supporting_query)}</div>`
+                : ""
+            }
+            <div>${escapeHtml(item.snippet)}</div>
+            ${
+              item.image_evidence?.length
+                ? `<div class="image-evidence-grid">
+                    ${item.image_evidence
+                      .filter((image) => image.artifact_id && item.doc_id)
+                      .slice(0, 2)
+                      .map(
+                        (image) => `
+                      <figure class="image-evidence-card">
+                        <img src="/api/documents/${item.doc_id}/figures/${image.artifact_id}" alt="${escapeHtml(
+                          image.image_name || "Figure evidence"
+                        )}" loading="lazy" />
+                        <figcaption>${escapeHtml(image.description || image.image_name || "Figure evidence")}</figcaption>
+                      </figure>
+                    `
+                      )
+                      .join("")}
+                  </div>`
+                : ""
+            }
+          </article>
+        `
+          )
+          .join("")}
+      </section>
+    `
+    )
+    .join("");
+
+  $("#chat-citations").innerHTML = summary + html;
 }
 
 function renderSubqueries(diagnostics = {}) {
   const subqueries = diagnostics.subqueries || [];
   const activity = diagnostics.activity || [];
   const hasReasoning = activity.some((item) => item.type === "agenticReasoning");
+  const selectedIndexes = diagnostics.selected_search_indexes || [];
+  const selectedSources = diagnostics.selected_knowledge_sources || [];
+  const routingMode = diagnostics.routing_mode;
+  const routingReason = diagnostics.routing_reason;
+  const routeSummary = selectedIndexes.length
+    ? `<article class="subquery-note"><strong>Routing</strong><div>${
+        diagnostics.multi_index_routing ? "Multi-index" : "Single-index"
+      } request over ${escapeHtml(selectedIndexes.join(", "))}</div>${
+        selectedSources.length ? `<div class="muted small">Knowledge sources: ${escapeHtml(selectedSources.join(", "))}</div>` : ""
+      }${routingMode ? `<div class="muted small">Mode: ${escapeHtml(routingMode)}</div>` : ""}${
+        routingReason ? `<div class="muted small">${escapeHtml(routingReason)}</div>` : ""
+      }</article>`
+    : "";
 
   if (!subqueries.length) {
     $("#chat-subqueries").innerHTML = hasReasoning
-      ? `<article class="subquery-note">Agentic reasoning ran, but Azure Search did not expose decomposed search steps in the response payload for this request.</article>`
-      : `<div class="muted">No query plan yet.</div>`;
+      ? routeSummary +
+        `<article class="subquery-note">Agentic reasoning ran, but Azure Search did not expose decomposed search steps in the response payload for this request.</article>`
+      : routeSummary || `<div class="muted">No query plan yet.</div>`;
     return;
   }
 
@@ -578,6 +704,7 @@ function renderSubqueries(diagnostics = {}) {
       : "";
 
   $("#chat-subqueries").innerHTML =
+    routeSummary +
     note +
     subqueries
       .map(
@@ -737,13 +864,13 @@ async function handleChat(event) {
     });
     state.chatMessages[state.chatMessages.length - 1] = {
       role: "assistant",
-      html: renderMarkdown(payload.answer),
+      html: renderAnswerWithReferences(payload.answer, payload.citations || []),
       pending: false,
       citations: payload.citations || [],
       diagnostics: payload.diagnostics || {},
     };
     renderChatThread();
-    renderCitations(payload.citations || []);
+    renderCitations(payload.citations || [], payload.diagnostics || {});
     renderSubqueries(payload.diagnostics || {});
     $("#chat-debug").textContent = JSON.stringify(payload.diagnostics, null, 2);
     $("#chat-input").value = "";
