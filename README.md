@@ -312,7 +312,7 @@ There are three separate layers in the journey:
 2. **Document layer**: rebuild one coherent document view with stable ordering, headings, figures, and metadata.
 3. **Retrieval layer**: create retrieval-friendly chunks from the unified document and publish them to Search.
 
-The revised large-document logic is:
+The specific logic for processing large-document (beyond default Document Intelligence limit) is:
 
 ```text
 segment for extraction only
