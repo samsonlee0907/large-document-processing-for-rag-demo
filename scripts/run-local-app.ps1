@@ -1,3 +1,7 @@
+param(
+    [int]$Port = 8000
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -21,4 +25,4 @@ Get-Content $envFile | ForEach-Object {
 }
 
 Set-Location $workspace
-& $pythonExe -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
+& $pythonExe -m uvicorn backend.app:app --host 127.0.0.1 --port $Port

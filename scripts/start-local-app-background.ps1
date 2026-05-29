@@ -1,12 +1,17 @@
+param(
+    [int]$Port = 8000
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $workspace = Split-Path -Parent $PSScriptRoot
 $launcher = Join-Path $PSScriptRoot "run-local-app.ps1"
-$stdout = Join-Path $workspace "server-live.stdout.log"
-$stderr = Join-Path $workspace "server-live.stderr.log"
+$stdoutSuffix = if ($Port -eq 8000) { "" } else { "-$Port" }
+$stdout = Join-Path $workspace "server-live$stdoutSuffix.stdout.log"
+$stderr = Join-Path $workspace "server-live$stdoutSuffix.stderr.log"
 $pwsh = "C:\Users\samsonlee\AppData\Local\Microsoft\WindowsApps\pwsh.exe"
-$port = 8000
+$port = $Port
 
 $deadline = (Get-Date).AddSeconds(15)
 while ($true) {
@@ -22,7 +27,7 @@ while ($true) {
 
 $process = Start-Process `
     -FilePath $pwsh `
-    -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $launcher `
+    -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $launcher, "-Port", $port `
     -WorkingDirectory $workspace `
     -WindowStyle Hidden `
     -RedirectStandardOutput $stdout `

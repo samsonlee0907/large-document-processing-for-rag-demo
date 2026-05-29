@@ -114,7 +114,12 @@ class IngestionPipeline:
             )
 
             intermediate = normalize_document(intermediate)
-            job_store.mark_stage(doc_id, Stage.cleanup, 45, "Normalized whitespace and preserved section structure.")
+            job_store.mark_stage(
+                doc_id,
+                Stage.cleanup,
+                45,
+                "Normalized document structure and stitched cross-segment boundaries where needed.",
+            )
 
             chunks = self.chunker.chunk(intermediate)
             job_store.mark_stage(

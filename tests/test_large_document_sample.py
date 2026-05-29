@@ -4,9 +4,14 @@ import unittest
 from unittest.mock import patch
 
 from pypdf import PdfReader
+from PIL import Image
 
 from backend.core.config import settings
-from backend.services.parsers import AzureDocumentIntelligenceParser, _extract_pdf_figure_artifacts
+from backend.services.parsers import (
+    AzureDocumentIntelligenceParser,
+    ParagraphBlock,
+    _extract_pdf_figure_artifacts,
+)
 from backend.services.sample_documents import (
     CONSTRUCTION_INDUSTRY_SECTIONS,
     POWER_SYSTEM_TRANSFORMATION_SECTIONS,
@@ -76,6 +81,44 @@ class LargeDocumentSampleTests(unittest.TestCase):
             self.assertGreaterEqual(len(figures), 1)
             self.assertEqual(figures[0]["page_number"], 1)
 
+    def test_pdf_image_extraction_skips_decompression_bomb_and_normalizes_formats(self) -> None:
+        class StubImage:
+            def __init__(self) -> None:
+                self.name = "oversized-plan.tiff"
+                self.data = b"raw-bytes"
+                self.image = Image.new("RGB", (300, 120), "white")
+
+        class StubImages:
+            def keys(self) -> list[str]:
+                return ["bad", "good"]
+
+            def __getitem__(self, key: str) -> StubImage:
+                if key == "bad":
+                    raise Image.DecompressionBombError("too large")
+                return StubImage()
+
+        class StubPage:
+            images = StubImages()
+
+        class StubReader:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                self.pages = [StubPage()]
+
+        with TemporaryDirectory() as directory:
+            artifacts_dir = Path(directory) / "artifacts"
+            with (
+                patch("backend.services.parsers.PdfReader", StubReader),
+                patch("backend.services.parsers.build_blob_artifact_store", return_value=None),
+                patch.object(settings, "artifacts_dir", artifacts_dir),
+            ):
+                figures = _extract_pdf_figure_artifacts(Path("ignored.pdf"), "doc-oversized", "ignored.pdf")
+
+        self.assertEqual(len(figures), 1)
+        self.assertEqual(figures[0]["page_number"], 1)
+        self.assertTrue(str(figures[0]["artifact_path"]).endswith(".png"))
+        self.assertEqual(figures[0]["output_format"], "png")
+        self.assertTrue(figures[0]["normalized_image"])
+
     def test_construction_blueprint_diagram_renders(self) -> None:
         with TemporaryDirectory() as directory:
             output = _build_section_diagram(CONSTRUCTION_INDUSTRY_SECTIONS[4], 5, Path(directory))
@@ -103,6 +146,23 @@ class LargeDocumentSampleTests(unittest.TestCase):
         ):
             self.assertTrue(parser._should_split_pdf(Path("oversized.pdf"), profile))
             self.assertEqual(parser._recommended_segment_size(Path("oversized.pdf"), profile), 4)
+
+    def test_structured_sections_preserve_paragraph_level_page_ranges(self) -> None:
+        parser = AzureDocumentIntelligenceParser()
+
+        sections = parser._build_structured_sections(
+            [
+                ParagraphBlock("Section 1. Capability Frontier", page_start=11, page_end=11),
+                ParagraphBlock("Capability is rising across multimodal and agentic systems.", page_start=11, page_end=12),
+                ParagraphBlock("Section 2. Delivery Bottlenecks", page_start=13, page_end=13),
+                ParagraphBlock("Grid constraints and permitting timelines shape project delivery.", page_start=13, page_end=14),
+            ],
+            "Pages 11-14",
+        )
+
+        self.assertEqual(len(sections), 2)
+        self.assertEqual((sections[0].page_start, sections[0].page_end), (11, 12))
+        self.assertEqual((sections[1].page_start, sections[1].page_end), (13, 14))
 
 
 if __name__ == "__main__":

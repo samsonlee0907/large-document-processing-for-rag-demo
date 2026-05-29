@@ -7,6 +7,7 @@ import re
 import subprocess
 import uuid
 from dataclasses import dataclass
+from math import sqrt
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import sleep
@@ -31,6 +32,11 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     docx = None  # type: ignore[assignment]
 
+try:
+    from PIL import Image as PILImage
+except Exception:  # pragma: no cover - optional dependency
+    PILImage = None  # type: ignore[assignment]
+
 
 @dataclass(slots=True)
 class DocumentProfile:
@@ -48,6 +54,73 @@ class PdfSegment:
     page_end: int
 
 
+@dataclass(slots=True)
+class ParagraphBlock:
+    text: str
+    page_start: int | None = None
+    page_end: int | None = None
+
+
+def _resampling_filter() -> object:
+    if PILImage is None:
+        raise RuntimeError("Pillow is required for image normalization.")
+    resampling = getattr(PILImage, "Resampling", PILImage)
+    return resampling.LANCZOS
+
+
+def _normalize_figure_image(
+    image: object,
+    artifact_base: Path,
+) -> tuple[Path, dict[str, object]]:
+    original_name = str(getattr(image, "name", artifact_base.name))
+    original_suffix = Path(original_name).suffix.lower() or ".bin"
+    metadata: dict[str, object] = {"original_image_name": original_name}
+
+    pil_image = getattr(image, "image", None)
+    if PILImage is None or pil_image is None:
+        artifact_path = artifact_base.with_suffix(original_suffix)
+        artifact_path.write_bytes(getattr(image, "data", b""))
+        metadata["normalized_image"] = False
+        metadata["output_format"] = original_suffix.lstrip(".")
+        return artifact_path, metadata
+
+    normalized = pil_image.copy()
+    width, height = normalized.size
+    metadata["original_width"] = width
+    metadata["original_height"] = height
+    pixel_count = width * height
+    metadata["original_pixel_count"] = pixel_count
+
+    scale_candidates = [1.0]
+    if settings.max_figure_image_pixels > 0 and pixel_count > settings.max_figure_image_pixels:
+        scale_candidates.append(sqrt(settings.max_figure_image_pixels / pixel_count))
+    if settings.max_figure_image_dimension > 0:
+        largest_dimension = max(width, height)
+        if largest_dimension > settings.max_figure_image_dimension:
+            scale_candidates.append(settings.max_figure_image_dimension / largest_dimension)
+    scale = min(scale_candidates)
+    if scale < 1.0:
+        resized_width = max(1, int(width * scale))
+        resized_height = max(1, int(height * scale))
+        normalized = normalized.resize((resized_width, resized_height), _resampling_filter())
+        metadata["resized_width"] = resized_width
+        metadata["resized_height"] = resized_height
+    else:
+        metadata["resized_width"] = width
+        metadata["resized_height"] = height
+
+    if normalized.mode not in {"RGB", "RGBA"}:
+        normalized = normalized.convert("RGBA" if "A" in normalized.getbands() else "RGB")
+    output_format = "PNG"
+    artifact_path = artifact_base.with_suffix(".png")
+    normalized.save(artifact_path, format=output_format, optimize=True)
+    metadata["normalized_image"] = True
+    metadata["output_format"] = output_format.lower()
+    metadata["artifact_pixel_count"] = metadata["resized_width"] * metadata["resized_height"]
+    metadata["downscaled"] = bool(scale < 1.0)
+    return artifact_path, metadata
+
+
 def _extract_pdf_figure_artifacts(path: Path, doc_id: str, source_name: str) -> list[dict[str, object]]:
     if PdfReader is None:
         return []
@@ -61,21 +134,47 @@ def _extract_pdf_figure_artifacts(path: Path, doc_id: str, source_name: str) -> 
     blob_store = build_blob_artifact_store()
     figures: list[dict[str, object]] = []
     for page_number, page in enumerate(reader.pages, start=1):
-        page_images = list(getattr(page, "images", []))
-        for image_index, image in enumerate(page_images, start=1):
-            suffix = Path(getattr(image, "name", "")).suffix or ".bin"
-            artifact_path = figure_dir / f"page_{page_number:04d}_figure_{image_index}{suffix}"
+        page_images = getattr(page, "images", None)
+        if page_images is None:
+            continue
+        try:
+            image_ids = list(page_images.keys())
+        except Exception as exc:
+            logger.warning(
+                "page image enumeration failed",
+                extra={"context": {"source": source_name, "page_number": page_number, "error": str(exc)}},
+            )
+            continue
+        for image_index, image_id in enumerate(image_ids, start=1):
             try:
-                artifact_path.write_bytes(image.data)
+                image = page_images[image_id]
+            except Exception as exc:
+                logger.warning(
+                    "skipping PDF figure image",
+                    extra={
+                        "context": {
+                            "source": source_name,
+                            "page_number": page_number,
+                            "image_index": image_index,
+                            "image_id": image_id if isinstance(image_id, str) else str(image_id),
+                            "error": str(exc),
+                        }
+                    },
+                )
+                continue
+            artifact_base = figure_dir / f"page_{page_number:04d}_figure_{image_index}"
+            try:
+                artifact_path, image_metadata = _normalize_figure_image(image, artifact_base)
             except Exception:
                 continue
             artifact_id = uuid.uuid4().hex[:12]
             figure: dict[str, object] = {
                 "artifact_id": artifact_id,
                 "page_number": page_number,
-                "image_name": getattr(image, "name", f"figure_{image_index}{suffix}"),
+                "image_name": getattr(image, "name", f"figure_{image_index}{artifact_path.suffix}"),
                 "artifact_path": str(artifact_path),
             }
+            figure.update(image_metadata)
             if blob_store is not None:
                 blob_name = f"documents/{doc_id}/figures/{artifact_path.name}"
                 try:
@@ -360,15 +459,15 @@ class AzureDocumentIntelligenceParser(AzureCognitiveAuthMixin, BaseParser):
             sections: list[SectionNode] = []
             for segment in segments:
                 result = self._analyze_document_result(segment.path)
-                paragraphs = self._extract_paragraphs(result)
+                paragraphs = self._extract_paragraph_blocks(
+                    result,
+                    page_offset=segment.page_start - 1,
+                )
                 segment_sections = self._build_structured_sections(
-                    paragraphs or ["No content returned."],
+                    paragraphs or [ParagraphBlock("No content returned.", segment.page_start, segment.page_end)],
                     f"Pages {segment.page_start}-{segment.page_end}",
                 )
-                for section in segment_sections:
-                    section.page_start = segment.page_start
-                    section.page_end = segment.page_end
-                    sections.append(section)
+                sections.extend(segment_sections)
             metadata["segment_count"] = len(segments)
             metadata["segment_page_ranges"] = [
                 {"page_start": segment.page_start, "page_end": segment.page_end} for segment in segments
@@ -445,8 +544,11 @@ class AzureDocumentIntelligenceParser(AzureCognitiveAuthMixin, BaseParser):
 
     def _analyze_document(self, path: Path, profile: DocumentProfile) -> list[SectionNode]:
         result = self._analyze_document_result(path)
-        paragraphs = self._extract_paragraphs(result)
-        return self._build_structured_sections(paragraphs, "Layout Extraction")
+        paragraphs = self._extract_paragraph_blocks(result)
+        return self._build_structured_sections(
+            paragraphs or [ParagraphBlock("No content returned.")],
+            "Layout Extraction",
+        )
 
     def _analyze_document_result(self, path: Path) -> dict:
         url = (
@@ -498,12 +600,38 @@ class AzureDocumentIntelligenceParser(AzureCognitiveAuthMixin, BaseParser):
             paragraphs = [result["content"]]
         return paragraphs
 
-    def _build_structured_sections(self, paragraphs: list[str], default_heading: str) -> list[SectionNode]:
+    def _extract_paragraph_blocks(self, result: dict, *, page_offset: int = 0) -> list[ParagraphBlock]:
+        blocks: list[ParagraphBlock] = []
+        for paragraph in result.get("paragraphs", []):
+            content = paragraph.get("content", "").strip()
+            if not content:
+                continue
+            page_numbers: list[int] = []
+            for region in paragraph.get("boundingRegions") or []:
+                page_number = region.get("pageNumber")
+                if isinstance(page_number, int):
+                    page_numbers.append(page_number + page_offset)
+            blocks.append(
+                ParagraphBlock(
+                    text=content,
+                    page_start=min(page_numbers) if page_numbers else None,
+                    page_end=max(page_numbers) if page_numbers else None,
+                )
+            )
+        if not blocks and result.get("content"):
+            blocks.append(ParagraphBlock(text=str(result["content"]).strip()))
+        return blocks
+
+    def _build_structured_sections(
+        self,
+        paragraphs: list[ParagraphBlock],
+        default_heading: str,
+    ) -> list[SectionNode]:
         sections: list[SectionNode] = []
-        preamble: list[str] = []
+        preamble: list[ParagraphBlock] = []
         current: SectionNode | None = None
         for paragraph in paragraphs:
-            heading_match = re.match(r"^Section\s+(\d+)[\.\-:]\s+(.*)$", paragraph)
+            heading_match = re.match(r"^Section\s+(\d+)[\.\-:]\s+(.*)$", paragraph.text)
             if heading_match:
                 normalized_heading = f"Section {heading_match.group(1)}. {heading_match.group(2).strip()}"
                 if current is not None and (
@@ -518,19 +646,49 @@ class AzureDocumentIntelligenceParser(AzureCognitiveAuthMixin, BaseParser):
                     heading=normalized_heading,
                     level=1,
                     paragraphs=[],
+                    page_start=paragraph.page_start,
+                    page_end=paragraph.page_end,
                 )
                 continue
             if current is None:
                 preamble.append(paragraph)
             else:
-                current.paragraphs.append(paragraph)
+                current.paragraphs.append(paragraph.text)
+                current.page_start = min(
+                    [value for value in [current.page_start, paragraph.page_start] if value is not None],
+                    default=current.page_start,
+                )
+                current.page_end = max(
+                    [value for value in [current.page_end, paragraph.page_end] if value is not None],
+                    default=current.page_end,
+                )
         if current is not None:
             sections.append(current)
         if sections:
             if preamble:
-                sections.insert(0, SectionNode(heading=default_heading, level=1, paragraphs=preamble))
+                preamble_page_starts = [block.page_start for block in preamble if block.page_start is not None]
+                preamble_page_ends = [block.page_end for block in preamble if block.page_end is not None]
+                sections.insert(
+                    0,
+                    SectionNode(
+                        heading=default_heading,
+                        level=1,
+                        paragraphs=[block.text for block in preamble],
+                        page_start=min(preamble_page_starts) if preamble_page_starts else None,
+                        page_end=max(preamble_page_ends) if preamble_page_ends else None,
+                    ),
+                )
             return sections
-        return [SectionNode(heading=default_heading, paragraphs=paragraphs)]
+        page_starts = [block.page_start for block in paragraphs if block.page_start is not None]
+        page_ends = [block.page_end for block in paragraphs if block.page_end is not None]
+        return [
+            SectionNode(
+                heading=default_heading,
+                paragraphs=[block.text for block in paragraphs],
+                page_start=min(page_starts) if page_starts else None,
+                page_end=max(page_ends) if page_ends else None,
+            )
+        ]
 
     def _split_pdf(self, path: Path, segment_size: int) -> list[PdfSegment]:
         if PdfReader is None or PdfWriter is None:
@@ -684,7 +842,7 @@ class FallbackPdfParser(BaseParser):
             return paragraphs
 
     def _figure_sections(self, path: Path, doc_id: str, metadata: dict[str, object]) -> list[SectionNode]:
-        figures = _extract_pdf_figure_artifacts(path, doc_id)
+        figures = _extract_pdf_figure_artifacts(path, doc_id, path.name)
         if not figures:
             return []
         metadata["figure_count"] = len(figures)

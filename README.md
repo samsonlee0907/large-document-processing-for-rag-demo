@@ -4,6 +4,21 @@ Production-minded FastAPI application for enterprise document ingestion, large-f
 
 The core design rule is simple: **the file is not the indexed unit**. A document first goes through profiling, parser selection, optional extractor-side segmentation, document reassembly, normalization, figure extraction, and structure-aware chunking. Only the resulting retrieval-ready chunks are published to Search.
 
+## Quick Navigation
+
+- [Platform Context](#platform-context)
+- [What The App Does](#what-the-app-does)
+- [Prerequisites](#prerequisites)
+- [What You Need To Deploy](#what-you-need-to-deploy)
+- [Deployment Setup](#deployment-setup)
+- [Running The App](#running-the-app)
+- [Current Architecture](#current-architecture)
+- [Ingestion To Indexing Journey](#ingestion-to-indexing-journey)
+- [Configuration](#configuration)
+- [Current Chat Behavior](#current-chat-behavior)
+- [Known Limits](#known-limits)
+- [Validation](#validation)
+
 ## Platform Context
 
 ### What is Azure AI Search?
@@ -12,7 +27,7 @@ Azure AI Search is Azure's retrieval system for text, vector, hybrid, and multim
 
 ### What is Foundry IQ?
 
-Foundry IQ is Microsoft Foundry's managed knowledge-base experience. Microsoft describes agentic retrieval as the multi-query retrieval engine that powers Foundry IQ knowledge bases, and notes that custom applications can use the same knowledge-base APIs through Azure AI Search. In other words, this repo uses Azure AI Search directly as the programmable path behind the same retrieval model that powers Foundry IQ.
+Foundry IQ is Microsoft Foundry's managed knowledge-base experience. Microsoft describes agentic retrieval as the multi-query retrieval engine that powers Foundry IQ knowledge bases, and notes that custom applications can use the same knowledge-base APIs through Azure AI Search. This repo uses Azure AI Search directly as the programmable path behind the same retrieval model that powers Foundry IQ.
 
 ### How this repo uses them together
 
@@ -123,6 +138,7 @@ Copy [.env.example](.env.example) to `.env`, then populate:
 - Foundry endpoint and chat deployment name
 - optional Search planning model settings
 - optional Blob storage settings
+- optional figure-image normalization limits for large embedded PDF images
 - optional extra knowledge-source JSON for multi-index routing
 
 ### 4. Let the app create Search-side retrieval objects
@@ -134,6 +150,55 @@ After the Azure services are configured, the app creates or updates:
 - the Search knowledge base
 
 This is why the provisioning script stops at service creation and does not try to hardcode your final corpus objects.
+
+## Running The App
+
+### Installation
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+```powershell
+pwsh -ExecutionPolicy Bypass -File .\scripts\start-local-app-background.ps1 -Port 8012
+```
+
+### Local run
+
+```powershell
+uvicorn backend.app:app --reload
+```
+
+Or use the included launcher scripts:
+
+```powershell
+.\scripts\run-local-app.ps1
+```
+
+Open [http://127.0.0.1:8000/](http://127.0.0.1:8000/).
+
+### End-to-end startup checklist
+
+1. Authenticate to Azure with `az login`
+2. Provision the required Azure resources
+3. Copy `.env.example` to `.env`
+4. Fill in the Azure values emitted by provisioning
+5. Install Python dependencies
+6. Start the app
+7. Upload a file or generate a sample corpus
+8. Wait for the corpus to become ready
+9. Open Chat and test grounded retrieval
+
+### Current endpoints
+
+- App: [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
+- Health: [http://127.0.0.1:8000/api/health](http://127.0.0.1:8000/api/health)
+- Config: [http://127.0.0.1:8000/api/config](http://127.0.0.1:8000/api/config)
+- Dashboard: [http://127.0.0.1:8000/api/dashboard](http://127.0.0.1:8000/api/dashboard)
+- Documents: [http://127.0.0.1:8000/api/documents](http://127.0.0.1:8000/api/documents)
+- Knowledge status: [http://127.0.0.1:8000/api/knowledge/status](http://127.0.0.1:8000/api/knowledge/status)
 
 ## Current Architecture
 
@@ -312,18 +377,7 @@ There are three separate layers in the journey:
 2. **Document layer**: rebuild one coherent document view with stable ordering, headings, figures, and metadata.
 3. **Retrieval layer**: create retrieval-friendly chunks from the unified document and publish them to Search.
 
-The revised large-document logic is:
-
-```text
-segment for extraction only
-reassemble into one ordered document view
-stitch boundary continuations
-normalize
-chunk semantically
-index
-```
-
-That distinction matters. A split batch is an **extractor boundary**, not an **indexing boundary**.
+For large PDFs, segmentation is used only to stay within extractor limits. The final indexed unit is created after the document is reassembled, boundary-stitched, normalized, and chunked.
 
 ```mermaid
 flowchart TD
@@ -400,29 +454,13 @@ For large files, this stage is allowed to be mechanically batch-oriented. The ne
 
 ### 4. Reassemble segments into one logical document
 
-After segmented extraction, the outputs should be treated as one ordered document again.
-
-The revised logic is:
-
-1. restore the original segment order
-2. preserve original page provenance
-3. rebuild one unified intermediate document
-4. treat segment boundaries as temporary extraction seams
-
-This is the most important design point for large documents. If segment A ends with the start of a thought and segment B begins with its continuation, indexing them independently can create retrieval loss.
-
-The practical rule is:
-
-```text
-extract in batches if necessary
-index only after the document is whole again
-```
+After segmented extraction, the parser restores the original segment order, preserves rebased page provenance at the paragraph or section level, and rebuilds one unified intermediate document. Segment boundaries remain temporary extraction seams and are not treated as final indexing boundaries.
 
 ### 5. Stitch boundary continuations
 
-Before chunking, the pipeline should run a boundary-stitch pass across adjacent segment outputs.
+Before chunking, the pipeline runs a boundary-stitch pass across adjacent segment outputs.
 
-That pass should check for:
+The stitch pass checks for:
 
 - sentence continuations split across segment boundaries
 - paragraph fragments cut by the segment seam
@@ -431,19 +469,11 @@ That pass should check for:
 - section heading carry-forward when segment B begins inside the same logical section as segment A
 - repeated headers and footers introduced by page or batch boundaries
 
-In other words:
-
-```text
-split for extraction
-stitch for coherence
-chunk for retrieval
-```
-
-This is the protection against the exact failure mode where the end of one extraction segment and the beginning of the next segment belong to the same paragraph, sentence, table, or section.
+The implementation uses deterministic seam-repair heuristics first. When a boundary is still ambiguous and a Foundry chat deployment is available, the pipeline can ask `gpt-5.4` whether two adjacent fragments belong to the same paragraph and, if so, merge them conservatively. The stitch pass records summary statistics in document metadata.
 
 ### 6. Normalize the unified document
 
-After reassembly, normalization should operate on the unified document view rather than on isolated segment payloads.
+After reassembly and stitching, normalization operates on the unified document view rather than on isolated segment payloads.
 
 Normalization is responsible for:
 
@@ -492,16 +522,19 @@ For each figure, the pipeline can store:
 - `artifact_id`
 - `page_number`
 - `artifact_path`
+- normalized image metadata such as resized dimensions and output format
 - Blob metadata if upload succeeds
 - `gpt-5.4` image description when enabled
 
 Figure preservation matters because some questions are answered better from diagrams, plans, tables, and callouts than from narrative text alone.
 
+Embedded TIFF or oversized PDF figures are normalized to PNG and downscaled when needed so large image artifacts do not fail ingestion or downstream image understanding.
+
 ### 9. Chunk from the unified document, not from raw batches
 
 Final retrieval chunking should happen after reassembly and normalization.
 
-The chunker should optimize for:
+The chunker optimizes for:
 
 - section coherence
 - sentence coherence
@@ -510,7 +543,7 @@ The chunker should optimize for:
 - overlap where needed
 - provenance back to the original document pages
 
-That means the desired chunk contract is:
+Each chunk is expected to preserve:
 
 - one chunk should represent one coherent unit of meaning
 - one chunk should not exist only because the extractor had to split the source file
@@ -540,13 +573,7 @@ Once the chunks are ready, the publishing adapter:
 3. ensures the knowledge source exists
 4. ensures the knowledge base exists
 
-The indexed unit should now be a coherent retrieval chunk, not a raw extraction segment.
-
-That is the end of the ingestion-to-indexing journey:
-
-```text
-file -> profile -> parser path -> optional extraction split -> parse -> reunify -> normalize -> figure handling -> chunk -> enrich -> publish
-```
+At this point, the indexed unit is a coherent retrieval chunk rather than a raw extraction segment.
 
 ### 11. Retrieve and answer
 
@@ -571,28 +598,20 @@ sequenceDiagram
     API-->>UI: answer + citations + image evidence + diagnostics
 ```
 
-## Current Implementation Status
+## Implementation Summary
 
-The app already implements these parts today:
+The current application includes:
 
-- upload and document profiling
-- split decisions based on page count and file size
-- per-segment extraction for oversized PDFs
-- intermediate JSON persistence
-- figure extraction
-- normalization
+- document profiling and parser routing
+- page-count and file-size split decisions for oversized PDFs
+- per-segment Azure Document Intelligence extraction
+- paragraph-level page rebasing for segmented parser output
+- segment-boundary stitching with deterministic repair and optional `gpt-5.4` disambiguation
+- normalized intermediate JSON persistence
 - structure-aware chunking
-- Azure AI Search publishing
-- grounded retrieval plus `gpt-5.4` answer synthesis
-
-The next hardening step is the explicit **segment-boundary stitch pass** described above.
-
-That is the main improvement area for large documents because the current code path still reassembles segment outputs more directly than the revised ideal. The revised logic in this README is the intended processing contract for production-quality large-document ingestion.
-
-In short:
-
-- the current system already profiles, segments, parses, normalizes, chunks, and publishes
-- the remaining hardening work is to make segment-boundary reunification more explicit and more precise before final chunk emission
+- Azure AI Search index, knowledge source, and knowledge base publishing
+- multi-index retrieval routing
+- grounded answer synthesis with `gpt-5.4`
 
 ## Sample Corpora
 
@@ -670,96 +689,6 @@ These are meant to support prompts such as:
 - “What does the BIM / digital twin blueprint imply about lifecycle evidence and retrieval?”
 - “Which callouts in the architecture sheet correspond to chunking, citations, and image evidence?”
 
-## Current Repository Layout
-
-```text
-backend/
-  app.py
-  core/
-    config.py
-    logging.py
-  domain/
-    models.py
-  services/
-    azure_auth.py
-    blob_storage.py
-    chat.py
-    chunking.py
-    foundry_openai.py
-    indexing.py
-    job_store.py
-    normalization.py
-    parsers.py
-    pipeline.py
-    sample_documents.py
-frontend/
-  static/
-    app.js
-    index.html
-    styles.css
-data/
-  uploads/
-  artifacts/
-scripts/
-  provision-azure.ps1
-  run-local-app.ps1
-  start-local-app-background.ps1
-tests/
-  test_chat.py
-  test_chunking.py
-  test_large_document_sample.py
-  test_parsers.py
-.env.example
-README.md
-requirements.txt
-.gitignore
-```
-
-## Running The App
-
-### Installation
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
-
-### Local run
-
-```powershell
-uvicorn backend.app:app --reload
-```
-
-Or use the included launcher scripts:
-
-```powershell
-.\scripts\run-local-app.ps1
-```
-
-Open [http://127.0.0.1:8000/](http://127.0.0.1:8000/).
-
-### End-to-end startup checklist
-
-1. Authenticate to Azure with `az login`
-2. Provision the required Azure resources
-3. Copy `.env.example` to `.env`
-4. Fill in the Azure values emitted by provisioning
-5. Install Python dependencies
-6. Start the app
-7. Upload a file or generate a sample corpus
-8. Wait for the corpus to become ready
-9. Open Chat and test grounded retrieval
-
-### Current endpoints
-
-- App: [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
-- Health: [http://127.0.0.1:8000/api/health](http://127.0.0.1:8000/api/health)
-- Config: [http://127.0.0.1:8000/api/config](http://127.0.0.1:8000/api/config)
-- Dashboard: [http://127.0.0.1:8000/api/dashboard](http://127.0.0.1:8000/api/dashboard)
-- Documents: [http://127.0.0.1:8000/api/documents](http://127.0.0.1:8000/api/documents)
-- Knowledge status: [http://127.0.0.1:8000/api/knowledge/status](http://127.0.0.1:8000/api/knowledge/status)
-
 ## Configuration
 
 Copy `.env.example` to `.env` and populate the values you need.
@@ -772,6 +701,7 @@ Copy `.env.example` to `.env` and populate the values you need.
 - `LARGE_DOCUMENT_PAGE_THRESHOLD`
 - `HARD_PAGE_SPLIT_THRESHOLD`
 - `HARD_FILE_SPLIT_THRESHOLD_MB`
+- `ENABLE_LLM_BOUNDARY_STITCHING`
 - `REQUEST_TIMEOUT_SECONDS`
 
 ### Parsing
@@ -850,7 +780,6 @@ One practical nuance: Azure AI Search agentic retrieval may perform reasoning wi
 - Search retrieval is the primary grounded retrieval plane; Foundry Agent Service is not the active chat path.
 - The fallback PDF parser is intentionally limited compared with Azure Document Intelligence.
 - `large_document_page_threshold` exists in config but is not the hard split trigger; the live split triggers are page count and file size.
-- The README now describes the intended extraction-to-indexing contract for large files; the explicit cross-segment stitch pass and more precise page-span rebasing are still the main hardening gaps.
 
 ## Validation
 

@@ -130,6 +130,7 @@ class Settings:
     hard_page_split_threshold: int = int(os.getenv("HARD_PAGE_SPLIT_THRESHOLD", "2000"))
     hard_file_split_threshold_mb: int = int(os.getenv("HARD_FILE_SPLIT_THRESHOLD_MB", "500"))
     use_semantic_chunking: bool = _env_flag("USE_SEMANTIC_CHUNKING", False)
+    enable_llm_boundary_stitching: bool = _env_flag("ENABLE_LLM_BOUNDARY_STITCHING", True)
     enable_demo_seed: bool = _env_flag("ENABLE_DEMO_SEED", True)
     azure_cli_path: str = os.getenv("AZURE_CLI_PATH", _default_azure_cli_path())
     azure_document_intelligence_endpoint: str = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT", "")
@@ -170,6 +171,8 @@ class Settings:
     azure_storage_account_key: str = os.getenv("AZURE_STORAGE_ACCOUNT_KEY", "")
     azure_storage_container: str = os.getenv("AZURE_STORAGE_CONTAINER", "document-figure-artifacts")
     enable_image_understanding: bool = _env_flag("ENABLE_IMAGE_UNDERSTANDING", True)
+    max_figure_image_pixels: int = int(os.getenv("MAX_FIGURE_IMAGE_PIXELS", "40000000"))
+    max_figure_image_dimension: int = int(os.getenv("MAX_FIGURE_IMAGE_DIMENSION", "4096"))
     request_timeout_seconds: int = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
 
     def ensure_directories(self) -> None:

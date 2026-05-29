@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import json
 import mimetypes
+import re
 from pathlib import Path
 from typing import Any
 
@@ -132,3 +134,54 @@ def describe_image_with_foundry(
         },
     ]
     return call_foundry_text(messages, max_completion_tokens=220)
+
+
+def stitch_segment_boundary_with_foundry(
+    previous_text: str,
+    next_text: str,
+    *,
+    previous_heading: str,
+    next_heading: str,
+) -> str | None:
+    if not settings.azure_foundry_chat_enabled:
+        return None
+
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": (
+                "You decide whether two extracted text fragments from adjacent PDF segments belong to the same paragraph. "
+                "Return strict JSON only with keys merge and merged_text. "
+                "Set merge to true only if the second fragment is a direct continuation of the first. "
+                "If merge is false, set merged_text to an empty string. "
+                "If merge is true, preserve the original wording and make only the minimum edits needed to join the fragments cleanly."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Previous heading: {previous_heading}\n"
+                f"Next heading: {next_heading}\n"
+                f"Previous fragment:\n{previous_text}\n\n"
+                f"Next fragment:\n{next_text}\n\n"
+                'Return JSON like {"merge": true, "merged_text": "..."}'
+            ),
+        },
+    ]
+    answer, _ = call_foundry_text(messages, max_completion_tokens=240)
+    normalized = answer.strip()
+    fence_match = re.search(r"\{.*\}", normalized, flags=re.DOTALL)
+    if fence_match:
+        normalized = fence_match.group(0)
+    try:
+        payload = json.loads(normalized)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if not payload.get("merge"):
+        return None
+    merged_text = payload.get("merged_text")
+    if not isinstance(merged_text, str) or not merged_text.strip():
+        return None
+    return merged_text.strip()
