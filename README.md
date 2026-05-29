@@ -379,6 +379,15 @@ There are three separate layers in the journey:
 
 For large PDFs, segmentation is used only to stay within extractor limits. The final indexed unit is created after the document is reassembled, boundary-stitched, normalized, and chunked.
 
+```text
+segment for extraction only
+reassemble into one ordered document view
+stitch boundary continuations
+normalize
+chunk semantically
+index
+```
+
 ```mermaid
 flowchart TD
     A["File uploaded"] --> B["Profile file<br/>format / complexity / page count / file size"]
